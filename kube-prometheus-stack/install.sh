@@ -1,44 +1,49 @@
-helm --kube-context rancher-desktop upgrade --install \
-kube-prometheus kube-prometheus-stack \
---repo https://prometheus-community.github.io/helm-charts \
---namespace monitoring \
---create-namespace \
---set grafana.ingress.enabled=true \
---set grafana.ingress.hosts[0]=grafana.localhost \
---set grafana.ingress.ingressClassName=nginx \
---set prometheus.prometheusSpec.maximumStartupDurationSeconds=60 \
---set thanosRuler.enabled=true \
---set thanosRuler.objectStorageConfig.type=FILESYSTEM \
---set thanosRuler.objectStorageConfig.config.directory=/data/thanos \
---set thanosRuler.thanosRulerSpec.queryEndpoints[0]=kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090 \
---set kubelet.serviceMonitor.cAdvisor=false \
---set alertmanager.enabled=false
+# helm --kube-context rancher-desktop upgrade --install \
+# kube-prometheus kube-prometheus-stack \
+# --repo https://prometheus-community.github.io/helm-charts \
+# --namespace monitoring \
+# --create-namespace \
+# --set grafana.ingress.enabled=true \
+# --set grafana.ingress.hosts[0]=grafana.localhost \
+# --set grafana.ingress.ingressClassName=nginx \
+# --set prometheus.prometheusSpec.maximumStartupDurationSeconds=60 \
+# --set thanosRuler.enabled=true \
+# --set thanosRuler.objectStorageConfig.type=FILESYSTEM \
+# --set thanosRuler.objectStorageConfig.config.directory=/data/thanos \
+# --set thanosRuler.thanosRulerSpec.queryEndpoints[0]=kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090 \
+# --set kubelet.serviceMonitor.cAdvisor=false \
+# --set alertmanager.enabled=false
 
-kubectl --context rancher-desktop apply -f - <<EOF
+kubectl --context rancher-desktop -n monitoring apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
     labels:
       app: cadvisor
     name: cadvisor
-    namespace: monitoring
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  annotations:
+    seccomp.security.alpha.kubernetes.io/pod: 'docker/default'
   labels:
     app: cadvisor
   name: cadvisor
-  namespace: monitoring
 spec:
   selector:
     matchLabels:
       app: cadvisor
+      name: cadvisor
   template:
     metadata:
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
       labels:
         app: cadvisor
+        name: cadvisor
     spec:
+      automountServiceAccountToken: false
       containers:
         - image: gcr.io/cadvisor/cadvisor:v0.45.0
           imagePullPolicy: IfNotPresent
@@ -60,6 +65,9 @@ spec:
             - mountPath: /rootfs
               name: rootfs
               readOnly: true
+            - mountPath: /var/run
+              name: var-run
+              readOnly: true
             - mountPath: /sys
               name: sys
               readOnly: true
@@ -69,11 +77,23 @@ spec:
             - mountPath: /dev/disk
               name: disk
               readOnly: true
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 30
       serviceAccountName: cadvisor
+      tolerations:
+        - key: node.role.kubernetes.io/control-plane
+          value: "true"
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/etcd
+          value: "true"
+          effect: NoExecute
       volumes:
         - name: rootfs
           hostPath:
             path: /
+        - name: var-run
+          hostPath:
+            path: /var/run
         - name: sys
           hostPath:
             path: /sys
@@ -88,7 +108,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cadvisor
-  namespace: monitoring
   labels:
     app: cadvisor
 spec:
@@ -105,29 +124,28 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: cadvisor
-  namespace: monitoring
   labels:
     app: cadvisor
     release: kube-prometheus
 spec:
-  selector:
-    matchLabels:
-      app: cadvisor
   endpoints:
-    - port: cadvisor
-      interval: 30s
-      metricRelabelings:
+    - metricRelabelings:
         - sourceLabels:
             - container_label_io_kubernetes_pod_name
           targetLabel: pod
         - sourceLabels:
-            - container_label_io_kubernetes_pod_namespace
-          targetLabel: namespace
-        - sourceLabels:
             - container_label_io_kubernetes_container_name
           targetLabel: container
+        - sourceLabels:
+            - container_label_io_kubernetes_pod_namespace
+          targetLabel: namespace
         - action: labeldrop
-          regex: (container_label_io_kubernetes_pod_name|container_label_io_kubernetes_pod_namespace|container_label_io_kubernetes_container_name)
+          regex: container_label_io_kubernetes_pod_name
+        - action: labeldrop
+          regex: container_label_io_kubernetes_container_name
+        - action: labeldrop
+          regex: container_label_io_kubernetes_pod_namespace
+      port: cadvisor
       relabelings:
         - sourceLabels:
             - __meta_kubernetes_pod_node_name
@@ -143,4 +161,7 @@ spec:
   namespaceSelector:
     matchNames:
       - monitoring
+  selector:
+    matchLabels:
+      app: cadvisor
 EOF
